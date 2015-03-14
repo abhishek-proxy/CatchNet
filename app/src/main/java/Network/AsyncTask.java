@@ -2,7 +2,7 @@ package Network;
 
 import android.os.Handler;
 import android.os.Message;
-
+import android.os.Process;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
@@ -20,11 +20,22 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public abstract class AsyncTask<Params, Progress, Result> {
 
+    private static final String LOG_TAG = "Async Task";
     private static final int CORE_POOL_SIZE = 4;
     private static final int MAXIMUM_POOL_SIZE = 128;
     private static final int KEEP_ALIVE = 1;
-
     private static final BlockingQueue<Runnable> sWorkQueue = new LinkedBlockingQueue<Runnable>(10);
+    private static final int MESSAGE_POST_RESULT = 0x1;
+    private static final int MESSAGE_POST_PROGRESS = 0x2;
+    private static final int MESSAGE_POST_CANCEL = 0x3;
+    private static final InternalHandler sHandler = new InternalHandler();
+    private final WorkerRunnable<Params, Result> mWorker;
+    private final FutureTask<Result> mFuture;
+    private volatile Status mStatus = Status.PENDING;
+    public enum Status {
+        PENDING, RUNNING, FINISHED;
+    }
+
 
     private static final ThreadFactory sThreadFactory = new ThreadFactory() {
         private final AtomicInteger mCount = new AtomicInteger(1);
@@ -38,29 +49,15 @@ public abstract class AsyncTask<Params, Progress, Result> {
             CORE_POOL_SIZE, MAXIMUM_POOL_SIZE, KEEP_ALIVE, TimeUnit.SECONDS,
             sWorkQueue, sThreadFactory);
 
-    private static final int MESSAGE_POST_RESULT = 0x1;
-    private static final int MESSAGE_POST_PROGRESS = 0x2;
-    private static final int MESSAGE_POST_CANCEL = 0x3;
-
-    private static final InternalHandler sHandler = new InternalHandler();
-
-    private final WorkerRunnable<Params, Result> mWorker;
-    private final FutureTask<Result> mFuture;
-
-    private volatile Status mStatus = Status.PENDING;
-
-    public enum Status {
-        PENDING, RUNNING, FINISHED;
-    }
 
     public AsyncTask() {
-        mWorker = new WorkerRunnable<Params, Result> {
+        mWorker = new WorkerRunnable<Params, Result>() {
             @Override
-            public Result call ()throws Exception {
+            public Result call() throws Exception {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
                 return doInBackground(mParams);
             }
-        } ;
+        };
 
         mFuture = new FutureTask<Result>(mWorker) {
             @Override
@@ -94,9 +91,10 @@ public abstract class AsyncTask<Params, Progress, Result> {
         };
     }
 
-    public final Status getStatus(){
+    public final Status getStatus() {
         return mStatus;
     }
+
     protected abstract Result doInBackground(Params... params);
 
     protected void onPreExecute() {
@@ -104,22 +102,40 @@ public abstract class AsyncTask<Params, Progress, Result> {
 
     protected void onPostExecute(Result result) {
     }
+
     protected void onProgressUpdate(Progress... values) {
     }
+
     public final boolean isCancelled() {
         return mFuture.isCancelled();
     }
-    protected void onCancelled(){
+
+    protected void onCancelled() {
     }
+
     public final boolean cancel(boolean mayInterruptIfRunning) {
         return mFuture.cancel(mayInterruptIfRunning);
     }
+
     public final Result get() throws InterruptedException, ExecutionException {
         return mFuture.get();
     }
+
     public final Result get(long timeout, TimeUnit unit)
             throws InterruptedException, ExecutionException, TimeoutException {
         return mFuture.get(timeout, unit);
+    }
+
+    protected final void publishProgress(Progress... values) {
+        sHandler.obtainMessage(MESSAGE_POST_PROGRESS,
+                new AsyncTaskResult<Progress>(this, values)).sendToTarget();
+    }
+
+    public void finish(Result result) {
+        if (!isCancelled())
+            result = null;
+        onPostExecute(result);
+        mStatus = Status.FINISHED;
     }
 
 
@@ -147,12 +163,6 @@ public abstract class AsyncTask<Params, Progress, Result> {
     }
 
 
-
-
-
-
-
-
     private static abstract class WorkerRunnable<Params, Result> implements
             Callable<Result> {
         Params[] mParams;
@@ -170,7 +180,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
     }
 
     private static class InternalHandler extends Handler {
-        @SuppressWarnings({ "unchecked", "RawUseOfParameterizedType" })
+        @SuppressWarnings({"unchecked", "RawUseOfParameterizedType"})
         @Override
         public void handleMessage(Message msg) {
             AsyncTaskResult result = (AsyncTaskResult) msg.obj;
